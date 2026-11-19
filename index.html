@@ -734,11 +734,11 @@ function wrapAuth(){
    const user=await adapter.signIn(u,p);
    const meta=(user&&user.user_metadata)||{};
    if(adapter.isAdmin()){
-    currentUser="admin";member=null;closeLogin();showAdmin();paint();toast("Masuk sebagai admin");
+    currentUser="admin";window.clearMember&&window.clearMember();closeLogin();showAdmin();paint();toast("Masuk sebagai admin");
    }else{
     const id=user.id;
     const synced={name:meta.full_name||meta.name||"",email:user.email||u,phone:meta.phone||"",address:meta.address||"",photo:""};
-    member={id,name:synced.name,email:synced.email};
+    window.setMember&&window.setMember({id,name:synced.name,email:synced.email});
     enter(id,synced);
     currentUser="user";
     document.getElementById("loginPass").value="";
@@ -762,7 +762,7 @@ function wrapAuth(){
    }
    const user=result.user||result.session.user;
    const synced={name,email:user.email||email,phone:"",address:"",photo:""};
-   member={id:user.id,name,email:synced.email};enter(user.id,synced);currentUser="user";
+   window.setMember&&window.setMember({id:user.id,name,email:synced.email});enter(user.id,synced);currentUser="user";
    ["regName","regEmail","regPass","regPass2"].forEach(id=>{const el=document.getElementById(id);if(el)el.value=""});
    closeLogin();updateNav();say("Akun VaanFood berhasil dibuat. Selamat datang, "+name.split(" ")[0]+"!");
    await pull();return true;
@@ -796,29 +796,36 @@ async function start(){
   const make={supabase:makeSupabase,firebase:makeFirebase}[MODE]||(window.VF_ADAPTERS&&window.VF_ADAPTERS[MODE]);
   if(!make)throw new Error('backend "'+MODE+'" tidak dikenal. Pakai "local", "supabase", atau "firebase".');
   adapter=await make(CFG[MODE]||{});
-  wrapAuth();baseline();purgeForeign();ready=true;
+  wrapAuth();
+  try{baseline();purgeForeign();}catch(e){console.warn("VF init",e)}ready=true;
   // Pulihkan sesi Supabase yang masih aktif agar login tetap terbaca setelah refresh/perangkat dibuka ulang.
+  try{
   if(MODE==="supabase"&&typeof adapter.getCurrentUser==="function"){
    const user=adapter.getCurrentUser();
    if(user){
     if(user.app_metadata&&user.app_metadata.role==="admin"){
-     currentUser="admin";member=null;showAdmin();
+     currentUser="admin";window.clearMember&&window.clearMember();showAdmin();
     }else{
      const meta=user.user_metadata||{};
      const saved={name:meta.full_name||meta.name||"",email:user.email||"",phone:meta.phone||"",address:meta.address||"",photo:""};
-     member={id:user.id,name:saved.name,email:saved.email};enter(user.id,saved);currentUser="user";updateNav();
+     window.setMember&&window.setMember({id:user.id,name:saved.name,email:saved.email});enter(user.id,saved);currentUser="user";updateNav();
     }
    }
   }
+  }catch(e){console.warn("VF restore",e)}
   setStatus("online");
-  await pull();
+  try{await pull()}catch(e){console.warn("VF pull",e);setStatus("error","Sinkron gagal: "+msgOf(e))}
   setInterval(()=>{if(!document.hidden)pull()},20000);
   document.addEventListener("visibilitychange",()=>{if(!document.hidden)pull()});
   addEventListener("online",()=>pull());
  }catch(e){adapter=null;setStatus("error","Belum tersambung: "+msgOf(e)+" Aplikasi memakai data lokal.")}
 }
-window.VF={mode:MODE,pull,uploadAll,updateProfile:data=>adapter&&adapter.updateProfile?adapter.updateProfile(data):Promise.resolve(),status:()=>({...st,admin:isAdminNow()})};
-if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",start);else start();
+window.VF={mode:MODE,ready:null,isConnected:()=>!!adapter,pull,uploadAll,updateProfile:data=>adapter&&adapter.updateProfile?adapter.updateProfile(data):Promise.resolve(),status:()=>({...st,connected:!!adapter,admin:isAdminNow()})};
+// Ekspos promise inisialisasi agar tombol Masuk/Daftar dapat menunggu server siap.
+const vfReady=document.readyState==="loading"
+ ? new Promise(resolve=>document.addEventListener("DOMContentLoaded",()=>resolve(start()),{once:true}))
+ : start();
+window.VF.ready=vfReady;
 })();
 
 </script>
@@ -1727,7 +1734,7 @@ const say=m=>{try{toast(m)}catch(e){alert(m)}};
 /* ---------- akun ---------- */
 let member=null,authTab="login";
 const initialProfile=Object.assign({},profile);
-window.memberKey=()=>member?member.id:(currentUser==="user"?"user":null);
+window.memberKey=()=>member?member.id:(currentUser==="user"?"user":null);window.clearMember=()=>{member=null};window.setMember=m=>{member=m};
 const users=()=>LSget("rn_users",[]);
 async function hashPw(pw,salt){
  try{const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(salt+":"+pw));return[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("")}
@@ -1758,7 +1765,19 @@ window.submitAuth=()=>authTab==="register"?doRegister():doLogin();
 async function doLogin(){
  const u=$("loginUser").value.trim(),p=$("loginPass").value,err=$("loginError");
  if(!u||!p){err.textContent="Isi email/username dan kata sandi.";return}
- if(window.VF&&window.VF.mode!=="local"&&typeof window.login==="function"){
+ if(window.VF&&window.VF.mode!=="local"){
+  // Tunggu inisialisasi Supabase/Firebase. Jangan jalankan login lokal pengganti
+  // ketika server belum siap atau gagal tersambung.
+  try{if(window.VF.ready)await window.VF.ready}catch(e){}
+  if(!window.VF.isConnected||!window.VF.isConnected()){
+   const status=window.VF.status?window.VF.status():null;
+   err.textContent="Server login belum tersambung. "+((status&&status.msg)||"Periksa koneksi internet lalu muat ulang halaman.");
+   return;
+  }
+  if(typeof window.login!=="function"){
+   err.textContent="Fungsi login server belum tersedia. Muat ulang halaman dan coba lagi.";
+   return;
+  }
   const ok=await window.login();
   if(ok)return;
   // Akun lama yang pernah dibuat hanya di browser laptop dapat dipindahkan sekali ke Supabase.
@@ -1783,7 +1802,17 @@ async function doRegister(){
  if(!/^\S+@\S+\.\S+$/.test(email)){err.textContent="Format email belum benar.";return}
  if(p1.length<6){err.textContent="Kata sandi minimal 6 karakter.";return}
  if(p1!==p2){err.textContent="Kata sandi dan pengulangannya belum sama.";return}
- if(window.VF&&window.VF.mode!=="local"&&typeof window.register==="function"){
+ if(window.VF&&window.VF.mode!=="local"){
+  try{if(window.VF.ready)await window.VF.ready}catch(e){}
+  if(!window.VF.isConnected||!window.VF.isConnected()){
+   const status=window.VF.status?window.VF.status():null;
+   err.textContent="Server pendaftaran belum tersambung. "+((status&&status.msg)||"Periksa koneksi internet lalu muat ulang halaman.");
+   return;
+  }
+  if(typeof window.register!=="function"){
+   err.textContent="Fungsi pendaftaran server belum tersedia. Muat ulang halaman dan coba lagi.";
+   return;
+  }
   await window.register(name,email,p1);return;
  }
  if(["admin","user"].includes(email)){err.textContent="Email ini tidak bisa dipakai.";return}
