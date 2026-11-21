@@ -641,7 +641,7 @@ async function makeSupabase(c){
  const sb=window.supabase.createClient(c.url,c.anonKey,{auth:{persistSession:true,autoRefreshToken:true}});
  const bucket=c.bucket||"vaanfood";
  let session=(await sb.auth.getSession()).data.session;
- sb.auth.onAuthStateChange((_e,s)=>{session=s});
+ sb.auth.onAuthStateChange((event,s)=>{session=s;if(event==="PASSWORD_RECOVERY")window.dispatchEvent(new Event("vf-password-recovery"))});
  const ok=(r,dup)=>{if(r.error&&!(dup&&r.error.code==="23505"))throw r.error;return r.data};
  return{
   name:"Supabase",
@@ -649,6 +649,8 @@ async function makeSupabase(c){
   isAdmin:()=>!!(session&&session.user&&session.user.app_metadata&&session.user.app_metadata.role==="admin"),
   async signIn(email,pw){const r=await sb.auth.signInWithPassword({email,password:pw});if(r.error)throw r.error;session=r.data.session;return r.data.user},
   async signUp(email,pw,name){const r=await sb.auth.signUp({email,password:pw,options:{data:{full_name:name,name}}});if(r.error)throw r.error;session=r.data.session||null;return {user:r.data.user,session:r.data.session||null}},
+  async resetPassword(email,redirectTo){const r=await sb.auth.resetPasswordForEmail(email,{redirectTo});if(r.error)throw r.error;return true},
+  async updatePassword(password){const r=await sb.auth.updateUser({password});if(r.error)throw r.error;return r.data.user},
   async updateProfile(data){const r=await sb.auth.updateUser({data:{full_name:data.name||"",name:data.name||"",phone:data.phone||"",address:data.address||""}});if(r.error)throw r.error;if(r.data.session)session=r.data.session;return r.data.user},
   async signOut(){await sb.auth.signOut();session=null},
   async getKV(){const d=ok(await sb.from("kv").select("key,value"))||[];const o={};d.forEach(r=>{o[r.key]=r.value});return o},
@@ -739,7 +741,7 @@ function wrapAuth(){
     const id=user.id;
     const synced={name:meta.full_name||meta.name||"",email:user.email||u,phone:meta.phone||"",address:meta.address||"",photo:""};
     window.setMember&&window.setMember({id,name:synced.name,email:synced.email});
-    window.enter(id,synced);
+    enter(id,synced);
     currentUser="user";
     document.getElementById("loginPass").value="";
     closeLogin();updateNav();say("Halo, "+(synced.name||"pelanggan").split(" ")[0]+"! Selamat datang kembali.");
@@ -762,7 +764,7 @@ function wrapAuth(){
    }
    const user=result.user||result.session.user;
    const synced={name,email:user.email||email,phone:"",address:"",photo:""};
-   window.setMember&&window.setMember({id:user.id,name,email:synced.email});window.enter(user.id,synced);currentUser="user";
+   window.setMember&&window.setMember({id:user.id,name,email:synced.email});enter(user.id,synced);currentUser="user";
    ["regName","regEmail","regPass","regPass2"].forEach(id=>{const el=document.getElementById(id);if(el)el.value=""});
    closeLogin();updateNav();say("Akun VaanFood berhasil dibuat. Selamat datang, "+name.split(" ")[0]+"!");
    await pull();return true;
@@ -808,7 +810,7 @@ async function start(){
     }else{
      const meta=user.user_metadata||{};
      const saved={name:meta.full_name||meta.name||"",email:user.email||"",phone:meta.phone||"",address:meta.address||"",photo:""};
-     window.setMember&&window.setMember({id:user.id,name:saved.name,email:saved.email});window.enter(user.id,saved);currentUser="user";updateNav();
+     window.setMember&&window.setMember({id:user.id,name:saved.name,email:saved.email});enter(user.id,saved);currentUser="user";updateNav();
     }
    }
   }
@@ -820,7 +822,7 @@ async function start(){
   addEventListener("online",()=>pull());
  }catch(e){adapter=null;setStatus("error","Belum tersambung: "+msgOf(e)+" Aplikasi memakai data lokal.")}
 }
-window.VF={mode:MODE,pull,uploadAll,updateProfile:data=>adapter&&adapter.updateProfile?adapter.updateProfile(data):Promise.resolve(),status:()=>({...st,admin:isAdminNow()})};
+window.VF={mode:MODE,pull,uploadAll,resetPassword:(email,redirectTo)=>adapter&&adapter.resetPassword?adapter.resetPassword(email,redirectTo):Promise.reject(new Error("Fitur reset kata sandi hanya tersedia saat terhubung ke Supabase.")),updatePassword:password=>adapter&&adapter.updatePassword?adapter.updatePassword(password):Promise.reject(new Error("Fitur ubah kata sandi hanya tersedia saat terhubung ke Supabase.")),updateProfile:data=>adapter&&adapter.updateProfile?adapter.updateProfile(data):Promise.resolve(),status:()=>({...st,admin:isAdminNow()})};
 if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",start);else start();
 })();
 
@@ -1023,6 +1025,12 @@ footer p,footer small{color:#e3eee3}
  <div id="paneLogin">
   <div class="field"><label>Email / Username</label><input id="loginUser" autocomplete="username" placeholder="email kamu"></div>
   <div class="field"><label>Kata sandi</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="Masukkan kata sandi"></div>
+  <button type="button" class="forgot-password" onclick="requestPasswordReset()">Lupa kata sandi?</button>
+ </div>
+ <div id="paneRecovery" hidden>
+  <div class="field"><label>Kata sandi baru</label><input id="recoveryPass" type="password" autocomplete="new-password" placeholder="Minimal 6 karakter"></div>
+  <div class="field"><label>Ulangi kata sandi baru</label><input id="recoveryPass2" type="password" autocomplete="new-password" placeholder="Ketik ulang kata sandi baru"></div>
+  <button type="button" class="btn btn-primary" style="width:100%" onclick="saveNewPassword()">Simpan kata sandi baru</button>
  </div>
  <div id="paneReg" hidden>
   <div class="field"><label>Nama lengkap</label><input id="regName" autocomplete="name" placeholder="Nama kamu"></div>
@@ -1743,12 +1751,11 @@ function enter(key,fallbackProfile){
  try{localStorage.setItem("rn_profile",JSON.stringify(profile))}catch(e){}
  const m=LSget("vf_profiles",{});m[key]=profile;LSset("vf_profiles",m);
 }
-// Ekspos fungsi masuk profil agar modul autentikasi Supabase di luar IIFE dapat memanggilnya.
-window.enter=enter;
 window.setAuthTab=function(t){
  authTab=t==="register"?"register":"login";const reg=authTab==="register";
  $("tabLogin").classList.toggle("on",!reg);$("tabReg").classList.toggle("on",reg);
- $("paneLogin").hidden=reg;$("paneReg").hidden=!reg;const hint=$("authHint");if(hint)hint.hidden=reg;
+ $("paneLogin").hidden=reg;$("paneReg").hidden=!reg;$("paneRecovery").hidden=true;const hint=$("authHint");if(hint)hint.hidden=reg;
+ $("tabLogin").parentElement.hidden=false;
  $("authTitle").textContent=reg?"Buat akun VaanFood":"Selamat datang kembali";
  $("authSubmit").textContent=reg?"Daftar sekarang":"Masuk";
  $("loginError").textContent="";
@@ -1760,6 +1767,34 @@ window.openLogin=function(tab,msg){
  setTimeout(()=>{const f=$(authTab==="register"?"regName":"loginUser");f&&f.focus()},120);
 };
 window.submitAuth=()=>authTab==="register"?doRegister():doLogin();
+window.requestPasswordReset=async function(){
+ const email=$("loginUser").value.trim().toLowerCase(),err=$("loginError");
+ if(!/^\\S+@\\S+\\.\\S+$/.test(email)){err.textContent="Masukkan email akun terlebih dahulu.";return}
+ if(!window.VF||window.VF.mode!=="supabase"){err.textContent="Reset kata sandi hanya tersedia untuk akun Supabase.";return}
+ try{
+  err.textContent="Mengirim tautan pemulihan…";
+  const redirectTo=window.location.origin+window.location.pathname;
+  await window.VF.resetPassword(email,redirectTo);
+  err.textContent="Tautan pemulihan dikirim jika email terdaftar. Periksa Inbox atau Spam.";
+ }catch(e){err.textContent="Gagal mengirim tautan: "+(e.message||"Periksa konfigurasi Supabase.")}
+};
+window.saveNewPassword=async function(){
+ const a=$("recoveryPass").value,b=$("recoveryPass2").value,err=$("loginError");
+ if(a.length<6){err.textContent="Kata sandi minimal 6 karakter.";return}
+ if(a!==b){err.textContent="Kedua kata sandi belum sama.";return}
+ try{
+  await window.VF.updatePassword(a);
+  $("recoveryPass").value=$("recoveryPass2").value="";
+  $("paneRecovery").hidden=true;$("paneLogin").hidden=false;$("tabLogin").parentElement.hidden=false;
+  $("authTitle").textContent="Kata sandi berhasil diubah";$("authMsg").textContent="Silakan masuk menggunakan kata sandi baru.";
+  $("loginError").textContent="Kata sandi berhasil diperbarui. Silakan masuk.";
+ }catch(e){err.textContent="Gagal mengubah kata sandi: "+(e.message||"Tautan mungkin kedaluwarsa.")}
+};
+window.addEventListener("vf-password-recovery",()=>{
+ $("loginModal").classList.add("show");$("paneLogin").hidden=true;$("paneReg").hidden=true;$("paneRecovery").hidden=false;
+ $("tabLogin").parentElement.hidden=true;$("authTitle").textContent="Buat kata sandi baru";
+ $("authMsg").textContent="Masukkan kata sandi baru untuk akun VaanFood.";$("loginError").textContent="";
+});
 async function doLogin(){
  const u=$("loginUser").value.trim(),p=$("loginPass").value,err=$("loginError");
  if(!u||!p){err.textContent="Isi email/username dan kata sandi.";return}
@@ -2262,3 +2297,8 @@ initAds();renderReviews();updateNav();
 })();
 </script>
 </body></html>
+
+<style>
+.forgot-password{display:block;margin:-3px 0 10px auto;padding:4px 0;background:transparent;border:0;color:#8b1730;font-size:12px;font-weight:700;text-decoration:underline;cursor:pointer}
+.forgot-password:hover{color:#681126}
+</style>
