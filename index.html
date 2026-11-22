@@ -728,7 +728,7 @@ function wrapAuth(){
  window.forgotPassword=async function(){
   const email=(document.getElementById("loginUser").value||"").trim().toLowerCase();
   const err=document.getElementById("loginError");
-  if(!/^\\S+@\\S+\\.\\S+$/.test(email)){err.textContent="Masukkan alamat email yang terdaftar pada kolom Email / Username.";return}
+  if(!/^\S+@\S+\.\S+$/.test(email)){err.textContent="Masukkan alamat email yang terdaftar pada kolom Email / Username.";return}
   if(!adapter||typeof adapter.resetPassword!=="function"){err.textContent="Layanan reset password belum siap. Muat ulang halaman dan coba lagi.";return}
   try{
    err.textContent="Mengirim tautan pemulihan…";
